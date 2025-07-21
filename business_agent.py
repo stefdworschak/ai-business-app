@@ -1,6 +1,6 @@
 from openai import OpenAI
 from pydantic import BaseModel
-from typing import Literal
+from typing import Literal, List
 import os
 
 try:
@@ -24,12 +24,17 @@ class EmailClassification(BaseModel):
     reasoning: str     # Brief explanation of the classification
 
 
+class OrderItem(BaseModel):
+    """Schema for individual order items"""
+    product_mentioned: str    # Product name/description mentioned by customer
+    product_id: str          # Matched product ID from catalog
+    quantity: int            # Quantity requested (default 1 if not specified)
+
+
 class OrderAnalysis(BaseModel):
     """Schema for analyzing order requests"""
-    products_mentioned: list[str]  # List of product names/descriptions mentioned
-    product_ids: list[str]        # Product codes if available
-    quantities: list[int]          # Corresponding quantities (if specified)
-    customer_intent: str           # What the customer wants to do
+    order_items: List[OrderItem]  # List of ordered items
+    customer_intent: str          # What the customer wants to do
     urgency_level: Literal["low", "medium", "high"]
 
 
@@ -69,18 +74,23 @@ class BusinessAgent:
         """
         system_prompt = """
         You are analyzing order request emails for a fashion store.
-        Extract the following information:
-        - List of products mentioned (even if vague descriptions)
-        - List of product IDs mentioned or extracted from the product descriptions provided below
-        - Quantities if specified (use 1 if not mentioned)
-        - Customer's intent/what they want to do
-        - Urgency level based on language used
+        Extract the following information for each product mentioned:
+        - Create an OrderItem for each product the customer wants to order
+        - For each OrderItem, include:
+          * product_mentioned: The exact product name/description the customer used
+          * product_id: The matching product ID from the catalog below
+          * quantity: How many items (use 1 if not specified)
 
-        If the customer does not specify the product code for an item, use the below product catalog to find the most relevant product ID:
-    
+        Also determine:
+        - customer_intent: What the customer wants to do overall
+        - urgency_level: Based on language used (low/medium/high)
+
+        Use the product catalog below to find the most relevant product ID for each item:
+
         {retrieved_context}
         
         Make sure to match products based on name, category, season, and description.
+        If multiple products are mentioned, create separate OrderItem entries for each.
         """
 
         retriever = self.vector_store.as_retriever(
@@ -108,7 +118,7 @@ Description: {doc.page_content}
             model=model,
             messages=[
                 {"role": "system", "content": system_prompt.format(retrieved_context=retrieved_context)},
-                {"role": "user", "content": f"Analyze this order request:\n\n{email_text}"}
+                {"role": "user", "content": f"Analyze this order request:\n\nSubject: {email_subject}\n\nBody: {email_text}"}
             ],
             response_format=OrderAnalysis
         )
@@ -130,15 +140,15 @@ if __name__ == "__main__":
     )
 
     # Initialize vector store (assuming you have a VectorstoreFactory class)
-    from vectorstore import VectorstoreFactory, PineconeVectorStore
+    from vectorstore import VectorstoreFactory
     from pinecone import Pinecone
     pinecone = Pinecone(api_key=PINECONE_API_KEY)
     vector_store_factory = VectorstoreFactory(pinecone)
     vector_store = vector_store_factory.get_vectorstore('products')
 
-
     # Create the business agent
     agent = BusinessAgent(client, vector_store)
+    
     # Example email texts
     sample_inquiry = """
     Hi there! I'm looking for a nice summer dress for a wedding. 
@@ -155,14 +165,14 @@ if __name__ == "__main__":
     # Classify emails with structured output
     print("=== Email Classification ===")
     
-    inquiry_result = agent.classify_email_structured("hello", sample_inquiry)
+    inquiry_result = agent.classify_email_structured("Summer dress inquiry", sample_inquiry)
     print(f"Email 1 Classification:")
     print(f"  Category: {inquiry_result.category}")
     print(f"  Confidence: {inquiry_result.confidence:.2f}")
     print(f"  Reasoning: {inquiry_result.reasoning}")
     print()
     
-    order_result = agent.classify_email_structured("hello", sample_order)
+    order_result = agent.classify_email_structured("Urgent order request", sample_order)
     print(f"Email 2 Classification:")
     print(f"  Category: {order_result.category}")
     print(f"  Confidence: {order_result.confidence:.2f}")
@@ -172,11 +182,15 @@ if __name__ == "__main__":
     # Analyze order request in detail
     if order_result.category == "order request":
         print("=== Order Analysis ===")
-        subject = "Ordering a Versatile Scarf-like item"
-        text = "Hello, I'd want to order one of your Versatile Scarves, the one that can be worn as a scarf, shawl, or headwrap. Thanks!"
-        order_analysis = agent.analyze_order_request(subject, text)
-        print(f"Products mentioned: {order_analysis.products_mentioned}")
-        print(f"Product IDs: {order_analysis.product_ids}")
-        print(f"Quantities: {order_analysis.quantities}")
+        subject = "Urgent order request"
+        order_analysis = agent.analyze_order_request(subject, sample_order)
+        
         print(f"Customer intent: {order_analysis.customer_intent}")
         print(f"Urgency level: {order_analysis.urgency_level}")
+        print(f"Order items ({len(order_analysis.order_items)}):")
+        
+        for i, item in enumerate(order_analysis.order_items, 1):
+            print(f"  Item {i}:")
+            print(f"    Product mentioned: {item.product_mentioned}")
+            print(f"    Product ID: {item.product_id}")
+            print(f"    Quantity: {item.quantity}")
