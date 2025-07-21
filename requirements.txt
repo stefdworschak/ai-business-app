@@ -1,0 +1,9 @@
+openai
+httpx==0.27.2
+langchain
+langchain-pinecone
+langchain-openai
+
+
+# dev
+ipdb
